@@ -1,0 +1,4 @@
+(executable
+ (public_name quickcode)
+ (name main)
+ (libraries str lib))
