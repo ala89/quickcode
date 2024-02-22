@@ -96,8 +96,20 @@ let string_match_all (r: Str.regexp) (s: string): int list =
   let rec aux (i: int) (l: int list): int list =
     if i <= n then
       try
-        let j = Str.search_forward r s i in
-        aux (j + 1) (j :: l)
+        let i' = Str.search_forward r s i in
+        aux (i' + 1) (i' :: l)
+      with Not_found -> l
+    else l
+  in List.rev (aux 0 [])
+
+let string_match_all_disjoint (r: Str.regexp) (s: string): int list =
+  let n = String.length s in
+  let rec aux (i: int) (l: int list): int list =
+    if i <= n then
+      try
+        let i' = Str.search_forward r s i in
+        let j = Str.match_end () in
+        aux (if i = j then (i + 1) else j) (i' :: l) (* epison does not increase j *)
       with Not_found -> l
     else l
   in List.rev (aux 0 [])
@@ -166,44 +178,45 @@ let generate_token_equivalence (s: string) =
     (tok, set)
   ) !eq)
 
-let enumerate_regexes_up_to (input: input_eq) (var: int) (k: int): (int * (token array)) list =
-  let s = input.rows.(var) in
-  let res = ref [(k, [||])] in
-  let rec aux (init: int) (i: int) (l: token list): unit =
-    if i = k then res := (init, Array.of_list (List.rev l)) :: !res
-    else if i < k then begin
-      List.iter (fun (tok, _) ->
-        if tok <> List.hd l && Str.string_match (Str.regexp (token_to_str tok)) s i then begin (* don't test twice the same token in a row, prevents looping with null matches *)
-          let j = Str.match_end () in
-          aux init j (tok :: l)
-        end
-      ) (input.eq.(var))
-    end in
-  List.iter (fun (tok, _) ->
-    try
-      let i = Str.search_forward (Str.regexp (token_to_str tok)) s 0 in
-      let j = Str.match_end () in
-      aux i j [tok]
-    with Not_found -> ()
-  ) (input.eq.(var));
-  !res
+let str_rev s =
+  let n = String.length s in
+  String.init n (fun i -> s.[n - i - 1])
 
-let enumerate_regexes_from (input: input_eq) (var: int) (k: int): (int * (token array)) list =
-  let s = input.rows.(var) in
+let regex_rev (r: regex) =
+  let n = Array.length r in
+  Array.init n (fun i ->
+    match r.(n - i - 1) with
+    | SpecialToken End_token -> SpecialToken Start_token
+    | SpecialToken Start_token -> SpecialToken End_token
+    | t -> t
+  )
+
+let enumerate_regexes_from (s: string) (tokens: token list) (k: int): (int * (token array)) list =
   let n = String.length s in
   let res = ref [(k, [||])] in
   let rec aux (i: int) (l: token list): unit =
     if i <= n then begin
-      List.iter (fun (tok, _) ->
+      List.iter (fun tok ->
         if (l = [] || tok <> List.hd l) && Str.string_match (Str.regexp (token_to_str tok)) s i then begin (* don't test twice the same token in a row, prevents looping with null matches *)
           let j = Str.match_end () in
           res := (j, Array.of_list (List.rev (tok :: l))) :: !res;
           aux j (tok :: l)
         end
-      ) (input.eq.(var))
+      ) tokens
     end in
   aux k [];
   !res
+
+let enumerate_regexes_up_to (s: string) (tokens: token list) (k: int): (int * (token array)) list =
+  let n = String.length s in
+  List.filter_map (fun (k1, r) ->
+    let r' = regex_rev r in
+    let k1' = n - k1 in
+    ignore (Str.string_match (Str.regexp (regex_to_str r')) s k1');
+    let j = Str.match_end () in
+    if j = k then Some (k1', r')
+    else None
+  ) (enumerate_regexes_from (str_rev s) tokens (n - k))
 
 let generate_regex (input: input_eq) (var: int) (r: token array): regex' =
   Array.map (fun tok -> List.assoc tok (input.eq.(var))) r
@@ -216,16 +229,19 @@ let generate_pos (input: input_eq) (var: int) (k: int): pos' Set.set =
     let n = String.length s in
     let res = ref (Set.of_list [CPos' k; CPos' (-(n-k+1))]) in (* first pos from the end (n) is -1 *)
 
-    let pre_regexes = enumerate_regexes_up_to input var k in
-    let post_regexes = enumerate_regexes_from input var k in
+    let tokens = List.map fst input.eq.(var) in
+    let pre_regexes = enumerate_regexes_up_to input.rows.(var) tokens k in
+    let post_regexes = enumerate_regexes_from input.rows.(var) tokens k in
 
     List.iter (fun (k1, r1) ->
       List.iter (fun (_, r2) ->
         let r = Array.append r1 r2 in
-        let matches = string_match_all (Str.regexp (regex_to_str r)) s in
-        let c = Option.get (List.find_index ((=) k1) matches) in
-        let c' = List.length matches in
-        res := Set.add (Pos' (generate_regex input var r1, generate_regex input var r2, Set.of_list [c; -(c'-c)])) !res (* first match from the end is -1 *)
+        let matches = string_match_all_disjoint (Str.regexp (regex_to_str r)) s in
+        match List.find_index ((=) k1) matches with
+        | Some c ->
+          let c' = List.length matches in
+          res := Set.add (Pos' (generate_regex input var r1, generate_regex input var r2, Set.of_list [c; -(c'-c)])) !res (* first match from the end is -1 *)
+        | _ -> ()        
       ) post_regexes
     ) pre_regexes;
 
@@ -390,7 +406,7 @@ let exec_pos (input: input) (p: pos) (var: int): int =
     else String.length input.(var) + k + 1
   | Pos (r1, r2, c) ->
     let r = Array.append r1 r2 in
-    let matches = string_match_all (Str.regexp (regex_to_str r)) input.(var) in
+    let matches = string_match_all_disjoint (Str.regexp (regex_to_str r)) input.(var) in
     let c' =
       if c >= 0 then c
       else List.length matches + c in
