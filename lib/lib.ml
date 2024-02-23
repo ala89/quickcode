@@ -1,3 +1,9 @@
+(*
+  Type definitions
+  - The base types of the language are named without a '
+  - Extended types that represent sets of objects are named with a '
+*)
+
 type special_token =
   | Start_token
   | End_token
@@ -46,12 +52,33 @@ type atomic_expr' =
   | SubStr' of int * pos' Set.set * pos' Set.set
   | ConstStr' of string
 
+(*
+  A trace expression set is represented by a graph that's vertices and edges can be determined
+  on the sole basis of the dims array.
+  
+  If e.dims = [d1; ...; dn], then:
+  - vertices are any [x1; ...; xn] st. x1 ∈ ⟦1; d1⟧, ..., xn ∈ ⟦1; dn⟧
+  - edges are any ([x1; ...; xn], [y1; ...; yn]) st. x1 < y1, ..., xn < yn
+
+  Edge labels are stored in e.mapping such that edge ([x1; ...; xn], [y1; ...; yn]) is referenced
+  by the key [(x1, y1); ...; (xn, yn)]. If a key does not belong to the table, the associated
+  set is empty.
+*)
 type trace_expr = atomic_expr array
 type trace_expr' = {
   dims: int array;
   mapping: ((int * int) list, atomic_expr' Set.set) Hashtbl.t
 }
 
+(*
+  An input object represents an input row from the spreadsheet. Its elements are called variables.
+  Upon receival, some values are precomputed and packed together as an input_eq:
+  - input.rows: original input
+  - input.eq: maps variables to a partition of tokens into equivalence classes and their representant for this variable,
+    eg. tok1 and tok2 belong to the same class iif their set matches is the same on input.rows.(i)
+  - input.pos: an initially empty table for memoizing generate_pos results since it is always identical for a
+    couple (var, k)
+*)
 type input = string array
 type input_eq = {
   rows: input;
@@ -59,6 +86,9 @@ type input_eq = {
   pos: ((int * int), pos' Set.set) Hashtbl.t 
 }
 
+(*
+  Utility globals
+*)
 let all_special_tokens = [
   Start_token;
   End_token;
@@ -91,6 +121,9 @@ let all_classes =
   (List.map (fun c -> ClassP c) all_char_classes)
   @ (List.map (fun c -> NotClassP c) all_char_classes)
 
+(*
+  Utility functions
+*)
 let string_match_all (r: Str.regexp) (s: string): int list =
   let n = String.length s in
   let rec aux (i: int) (l: int list): int list =
@@ -109,7 +142,7 @@ let string_match_all_disjoint (r: Str.regexp) (s: string): int list =
       try
         let i' = Str.search_forward r s i in
         let j = Str.match_end () in
-        aux (if i = j then (i + 1) else j) (i' :: l) (* epison does not increase j *)
+        aux (if i = j then (i + 1) else j) (i' :: l) (* epsilon does not increase j *)
       with Not_found -> l
     else l
   in List.rev (aux 0 [])
@@ -153,9 +186,10 @@ let token_to_str = function
   | ClassP c -> class_p_to_str c ^ "+"
   | NotClassP c -> not_class_p_to_str c ^ "+"
   | SpecialToken st -> special_token_to_str st
-  
-let regex_to_str (r: regex) =
-  Array.fold_left (fun acc tok -> acc ^ token_to_str tok) "" r
+
+(* Turns a regex into a valid OCaml regexp string *)
+let regex_to_caml_regexp (r: regex) =
+  Str.regexp (Array.fold_left (fun acc tok -> acc ^ token_to_str tok) "" r)
 
 let generate_token_equivalence (s: string) =
   let rec update matches tok = function
@@ -167,16 +201,15 @@ let generate_token_equivalence (s: string) =
   let eq = ref [] in
   List.iter (fun tok ->
     let matches = string_match_all (Str.regexp (token_to_str tok)) s in
-    eq := update matches tok !eq
+    if matches <> [] then eq := update matches tok !eq (* don't include tokens with no matches as they will never be used *)
   ) all_classes;
 
-  (List.map (fun st ->
+  (List.filter_map (fun st -> (* special tokens are computed separately as their matches are always disjoint, unless they don't match at all *)
     let tok = (SpecialToken st) in
-    (tok, Set.singleton tok)
-  ) all_special_tokens) @ (List.map (fun (_, set) ->
-    let tok = Set.choose set in
-    (tok, set)
-  ) !eq)
+    let matches = string_match_all (Str.regexp (token_to_str tok)) s in
+    if matches <> [] then Some (tok, Set.singleton tok)
+    else None
+  ) all_special_tokens) @ (List.map (fun (_, set) -> (Set.choose set, set)) !eq)
 
 let str_rev s =
   let n = String.length s in
@@ -191,6 +224,7 @@ let regex_rev (r: regex) =
     | t -> t
   )
 
+(* Generate all couples (k2, r) st. r matches s[k:k2[ *)
 let enumerate_regexes_from (s: string) (tokens: token list) (k: int): (int * (token array)) list =
   let n = String.length s in
   let res = ref [(k, [||])] in
@@ -207,17 +241,23 @@ let enumerate_regexes_from (s: string) (tokens: token list) (k: int): (int * (to
   aux k [];
   !res
 
+(* Generate all couples (k1, r) st. r matches s[k1:k]
+ It's easier to reuse the previous function by reversing the string, and then carefully reversing the result again
+*)
 let enumerate_regexes_up_to (s: string) (tokens: token list) (k: int): (int * (token array)) list =
   let n = String.length s in
   List.filter_map (fun (k1, r) ->
     let r' = regex_rev r in
     let k1' = n - k1 in
-    ignore (Str.string_match (Str.regexp (regex_to_str r')) s k1');
+    ignore (Str.string_match (regex_to_caml_regexp r') s k1');
     let j = Str.match_end () in
-    if j = k then Some (k1', r')
+    if j = k then Some (k1', r') (* since the results were computed starting backwards at k-1, we need to ensure that when matching forward, the match ends at k *)
     else None
   ) (enumerate_regexes_from (str_rev s) tokens (n - k))
 
+(*
+  Procedures described in the pseudo-code
+*)
 let generate_regex (input: input_eq) (var: int) (r: token array): regex' =
   Array.map (fun tok -> List.assoc tok (input.eq.(var))) r
 
@@ -236,8 +276,8 @@ let generate_pos (input: input_eq) (var: int) (k: int): pos' Set.set =
     List.iter (fun (k1, r1) ->
       List.iter (fun (_, r2) ->
         let r = Array.append r1 r2 in
-        let matches = string_match_all_disjoint (Str.regexp (regex_to_str r)) s in
-        match List.find_index ((=) k1) matches with
+        let matches = string_match_all_disjoint (regex_to_caml_regexp r) s in
+        match List.find_index ((=) k1) matches with (* since matches are disjoint, it's not guaranteed that k1 is actually a match *)
         | Some c ->
           let c' = List.length matches in
           res := Set.add (Pos' (generate_regex input var r1, generate_regex input var r2, Set.of_list [c; -(c'-c)])) !res (* first match from the end is -1 *)
@@ -273,7 +313,9 @@ let generate_str (input: input_eq) (s: string): trace_expr' =
   done;
   { dims = [|n|]; mapping };;
 
-(* Intersection *)
+(* Intersection procedure *)
+
+(* Given two sets s1 and s2, computes the set { e1 ∩ e2 | e1 ∈ s1, e2 ∈ s2 } where f is the intersection function *)
 let intersect_generic_set (s1: 'a Set.set) (s2: 'a Set.set) (f: 'a -> 'a -> 'a option): 'a Set.set =
   let res = ref Set.empty in
   Set.iter (fun e1 ->
@@ -299,7 +341,7 @@ let intersect_regex (r1: regex') (r2: regex'): regex' option =
     match loop 0 [] with
     | Some l -> Some (Array.of_list (List.rev l))
     | None -> None
-  end;;
+  end
 
 let intersect_pos (p1: pos') (p2: pos') =
   match p1, p2 with
@@ -335,6 +377,10 @@ let intersect_trace (t1: trace_expr') (t2: trace_expr') =
   ) (Hashtbl.to_seq t1.mapping);
   { dims; mapping }
 
+(*
+  Program generation from input/output examples
+  Generates a trace expression set for each input/ouput example and attempts to intersect them
+*)
 let make_input_eq (rows: input): input_eq =
   {
     rows;
@@ -351,10 +397,10 @@ let generate_program (ios: (input * string) list): trace_expr' =
     ) t iol
   | _ -> failwith "Provide at least one IO example";;
 
-
-(* Choose one *)
-exception Path_found of atomic_expr' Set.set list
-
+(*
+  Choose one
+  Extract one trace expression from trace expression set
+*)
 let choose_one_regex (r: regex'): regex =
   Array.map (fun ts -> Set.choose ts) r
 
@@ -373,6 +419,8 @@ let edge_starts_at =
 
 let edge_end =
   List.map snd
+
+exception Path_found of atomic_expr' Set.set list
 
 let choose_one_trace (t: trace_expr'): trace_expr =
   let seen = Hashtbl.create 0 in
@@ -398,7 +446,10 @@ let choose_one_trace (t: trace_expr'): trace_expr =
         choose_one_atomic (Set.choose fs)
       ) p)
 
-(* Exec *)
+(*
+  Exec
+  Run a trace expression on a given input
+*)
 let exec_pos (input: input) (p: pos) (var: int): int =
   match p with
   | CPos k ->
@@ -406,12 +457,12 @@ let exec_pos (input: input) (p: pos) (var: int): int =
     else String.length input.(var) + k + 1
   | Pos (r1, r2, c) ->
     let r = Array.append r1 r2 in
-    let matches = string_match_all_disjoint (Str.regexp (regex_to_str r)) input.(var) in
+    let matches = string_match_all_disjoint (regex_to_caml_regexp r) input.(var) in
     let c' =
       if c >= 0 then c
       else List.length matches + c in
     let k1 = List.nth matches c' in
-    ignore (Str.string_match (Str.regexp (regex_to_str r1)) input.(var) k1);
+    ignore (Str.string_match (regex_to_caml_regexp r1) input.(var) k1);
     Str.match_end ()
 
 let exec_atomic (input: input) (f: atomic_expr): string =
