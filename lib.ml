@@ -308,7 +308,7 @@ let generate_str (input: input_eq) (s: string): trace_expr' =
     for j = i + 1 to n do
       let substr = String.sub s i (j - i) in
       let set = Set.add (ConstStr' substr) (generate_substr input substr) in
-      Hashtbl.add mapping [(i, j)] set
+      Hashtbl.add mapping [(i, j)] set;
     done
   done;
   { dims = [|n|]; mapping };;
@@ -372,9 +372,10 @@ let intersect_trace (t1: trace_expr') (t2: trace_expr') =
     Seq.iter (fun (k2, fs2) ->
       let f = intersect_generic_set fs1 fs2 intersect_atomic in
       if not (Set.is_empty f) then
-        Hashtbl.add mapping (k1 @ k2) f
+        Hashtbl.add mapping (k1 @ k2) f;
     ) (Hashtbl.to_seq t2.mapping)
   ) (Hashtbl.to_seq t1.mapping);
+
   { dims; mapping }
 
 (*
@@ -427,7 +428,7 @@ let choose_one_trace (t: trace_expr'): trace_expr =
   let dest = Array.to_list t.dims in
   let n_dim = Array.length t.dims in
   let edges = Hashtbl.to_seq t.mapping in
-  
+
   let rec explore (x: int list) (l: atomic_expr' Set.set list) =
     if x = dest then raise (Path_found (List.rev l))
     else if not (Hashtbl.mem seen x) then begin
@@ -475,3 +476,23 @@ let exec_atomic (input: input) (f: atomic_expr): string =
 
 let exec_trace (input: input) (t: trace_expr): string =
   Array.fold_left (fun acc f -> acc ^ (exec_atomic input f)) "" t
+
+(*
+  Size
+  Retrieves the size of a trace expression set  
+*)
+let size_regex (r: regex'): int =
+  Array.fold_left (fun acc set -> Set.cardinal set * acc) 1 r
+
+let size_pos (p: pos'): int =
+  match p with
+  | CPos' _ -> 1
+  | Pos' (r1, r2, c) -> size_regex r1 * size_regex r2 * Set.cardinal c
+
+let size_atomic (f: atomic_expr'): int =
+  match f with
+  | ConstStr' _ -> 1
+  | SubStr' (v, ps1, ps2) ->
+    let sum1 = Set.fold (fun p acc -> acc + size_pos p) ps1 0 in
+    let sum2 = Set.fold (fun p acc -> acc + size_pos p) ps1 0 in
+    sum1 * sum2

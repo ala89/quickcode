@@ -1,1 +1,6 @@
 _build
+a.out
+*.cmi
+*.cmo
+*.o
+*.cmx
