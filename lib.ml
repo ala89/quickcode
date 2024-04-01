@@ -379,6 +379,68 @@ let intersect_trace (t1: trace_expr') (t2: trace_expr') =
   { dims; mapping }
 
 (*
+  Size
+  Retrieves the size of a trace expression set  
+*)
+let edge_starts_at =
+  List.for_all2 (fun i (j, _) -> i = j)
+
+let edge_end =
+  List.map snd
+
+let size_regex (r: regex'): int =
+  Array.fold_left (fun acc set -> Set.cardinal set * acc) 1 r
+
+let size_pos (p: pos'): int =
+  match p with
+  | CPos' _ -> 1
+  | Pos' (r1, r2, c) -> size_regex r1 * size_regex r2 * Set.cardinal c
+
+let size_atomic (f: atomic_expr'): int =
+  match f with
+  | ConstStr' _ -> 1
+  | SubStr' (v, ps1, ps2) ->
+    let sum1 = Set.fold (fun p acc -> acc + size_pos p) ps1 0 in
+    let sum2 = Set.fold (fun p acc -> acc + size_pos p) ps1 0 in
+    sum1 * sum2
+
+let size_trace (t: trace_expr'): int =
+  let dp = Hashtbl.create 0 in
+  let n_dim = Array.length t.dims in
+  let src = List.init n_dim (fun _ -> 0) in
+  let dest = Array.to_list t.dims in
+  let edges = Hashtbl.to_seq t.mapping in
+
+  let current = ref Set.empty in
+  let frontier = ref (Set.singleton src) in
+
+  let add_to_dp (x: int list) (n: int): unit =
+    match Hashtbl.find_opt dp x with
+    | Some n' -> Hashtbl.replace dp x (n + n')
+    | None -> Hashtbl.add dp x n in
+
+  add_to_dp src 1;
+
+  while not (Set.is_empty !frontier) do
+    current := !frontier;
+    frontier := Set.empty;
+    Set.iter (fun x ->
+      let x_size = Hashtbl.find dp x in
+      Seq.iter (fun (e, fs) ->
+        if edge_starts_at x e then begin
+          let y = edge_end e in
+          add_to_dp y (x_size * (Set.fold (fun f acc -> acc + size_atomic f) fs 0));
+          frontier := Set.add y !frontier
+        end
+      ) edges
+    ) !current
+  done;
+
+  match Hashtbl.find_opt dp dest with
+  | Some n -> n
+  | None -> 0
+
+(*
   Program generation from input/output examples
   Generates a trace expression set for each input/ouput example and attempts to intersect them
 *)
@@ -390,13 +452,25 @@ let make_input_eq (rows: input): input_eq =
   }
 
 let generate_program (ios: (input * string) list): trace_expr' =
-  match ios with
-  | first_io :: iol ->
-    let t = generate_str (make_input_eq (fst first_io)) (snd first_io) in
-    List.fold_left (fun acc io ->
-      intersect_trace acc (generate_str (make_input_eq (fst io)) (snd io))
-    ) t iol
-  | _ -> failwith "Provide at least one IO example";;
+  let programs = List.mapi (fun i io ->
+    let t = generate_str (make_input_eq (fst io)) (snd io) in
+    Printf.printf "Program %d Size: %d\n%!" i (size_trace t);
+    t
+  ) ios in
+
+  match programs with
+  | first_t :: ts ->
+    let res = ref first_t in
+    let ls = ref ts in
+    let step = ref 1 in
+    while not (List.is_empty !ls) do
+      res := intersect_trace !res (List.hd !ls);
+      Printf.printf "Step %d Size: %d\n%!" !step (size_trace !res);
+      ls := (List.tl !ls);
+      incr step
+    done;
+    !res
+  | _ -> failwith "Provide at least one IO example"
 
 (*
   Choose one
@@ -415,20 +489,15 @@ let choose_one_atomic (f: atomic_expr'): atomic_expr =
   | ConstStr' s -> ConstStr s
   | SubStr' (v, ps1, ps2) -> Substr (v, choose_one_pos (Set.choose ps1), choose_one_pos (Set.choose ps2))
 
-let edge_starts_at =
-  List.for_all2 (fun i (j, _) -> i = j)
-
-let edge_end =
-  List.map snd
-
 exception Path_found of atomic_expr' Set.set list
 
 let choose_one_trace (t: trace_expr'): trace_expr =
   let seen = Hashtbl.create 0 in
-  let dest = Array.to_list t.dims in
   let n_dim = Array.length t.dims in
+  let src = List.init n_dim (fun _ -> 0) in
+  let dest = Array.to_list t.dims in
   let edges = Hashtbl.to_seq t.mapping in
-
+  
   let rec explore (x: int list) (l: atomic_expr' Set.set list) =
     if x = dest then raise (Path_found (List.rev l))
     else if not (Hashtbl.mem seen x) then begin
@@ -439,7 +508,7 @@ let choose_one_trace (t: trace_expr'): trace_expr =
     end in
 
   try
-    explore (List.init n_dim (fun _ -> 0)) [];
+    explore src [];
     failwith "Incompatible IO examples"
   with
     Path_found p ->
@@ -476,23 +545,3 @@ let exec_atomic (input: input) (f: atomic_expr): string =
 
 let exec_trace (input: input) (t: trace_expr): string =
   Array.fold_left (fun acc f -> acc ^ (exec_atomic input f)) "" t
-
-(*
-  Size
-  Retrieves the size of a trace expression set  
-*)
-let size_regex (r: regex'): int =
-  Array.fold_left (fun acc set -> Set.cardinal set * acc) 1 r
-
-let size_pos (p: pos'): int =
-  match p with
-  | CPos' _ -> 1
-  | Pos' (r1, r2, c) -> size_regex r1 * size_regex r2 * Set.cardinal c
-
-let size_atomic (f: atomic_expr'): int =
-  match f with
-  | ConstStr' _ -> 1
-  | SubStr' (v, ps1, ps2) ->
-    let sum1 = Set.fold (fun p acc -> acc + size_pos p) ps1 0 in
-    let sum2 = Set.fold (fun p acc -> acc + size_pos p) ps1 0 in
-    sum1 * sum2
